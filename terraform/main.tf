@@ -24,7 +24,7 @@ resource "null_resource" "vagrant_reload" {
 
 resource "vagrant_vm" "eks_admin_vm" {
   name            = "eks-image-builder"
-  vagrantfile_dir = "${path.module}"
+  vagrantfile_dir = path.module
 
   # Pass VAGRANT_LOG=info to surface early errors in CI
   env = {
