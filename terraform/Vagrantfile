@@ -49,27 +49,28 @@ Vagrant.configure("2") do |config|
 
     echo "==> Allowing ssh-rsa for local Ansible/Packer connections"
     sudo -u image-builder mkdir -p /home/image-builder/.ssh
-    sudo -u image-builder bash -c "printf 'HostKeyAlgorithms +ssh-rsa\\nPubkeyAcceptedKeyTypes +ssh-rsa\\n' >> /home/image-builder/.ssh/config"
+    sudo -u image-builder bash -c "printf 'HostKeyAlgorithms +ssh-rsa\\\\nPubkeyAcceptedKeyTypes +ssh-rsa\\\\n' >> /home/image-builder/.ssh/config"
     sudo -u image-builder chmod 600 /home/image-builder/.ssh/config
 
     echo "==> Installing latest eks-a image-builder CLI"
-    # Install as root since it's a system-wide binary
+    # Simplified installation process
     cd /tmp
+    sudo -u image-builder /snap/bin/yq --version  # Ensure yq is available
 
     # Get the latest EKS-A version
     EKSA_RELEASE_VERSION=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | /snap/bin/yq '.spec.latestVersion')
 
-    # Get bundle manifest URL
+    # Get bundle manifest URL (using single quotes to avoid expansion issues)
     BUNDLE_MANIFEST_URL=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | \
-        /snap/bin/yq ".spec.releases[] | select(.version==\"$EKSA_RELEASE_VERSION\").bundleManifestUrl")
+      /snap/bin/yq '.spec.releases[] | select(.version == "'"$EKSA_RELEASE_VERSION"'").bundleManifestUrl')
 
     # Get image builder tarball URI
     IMAGEBUILDER_TARBALL_URI=$(curl -sL "$BUNDLE_MANIFEST_URL" | \
-        /snap/bin/yq '.spec.versionsBundles[0].eksD.imagebuilder.uri')
+      /snap/bin/yq '.spec.versionsBundles[0].eksD.imagebuilder.uri')
 
     # Download and install
     curl -sL "$IMAGEBUILDER_TARBALL_URI" | tar xz ./image-builder
-    install -m 0755 image-builder /usr/local/bin/image-builder
+    sudo install -m 0755 image-builder /usr/local/bin/image-builder
 
     echo "==> Setting PATH for image-builder user"
     echo 'export PATH=$PATH:/snap/bin' >> /home/image-builder/.profile
