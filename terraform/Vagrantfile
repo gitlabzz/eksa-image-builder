@@ -68,7 +68,7 @@ Vagrant.configure("2") do |config|
 
       curl -sL "${IMAGEBUILDER_TARBALL_URI}" | tar xz ./image-builder
       sudo install -m 0755 image-builder /usr/local/bin/image-builder
-    EOF
+EOF
 
     echo "==> Provisioning complete."
   SHELL
