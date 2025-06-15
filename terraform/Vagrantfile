@@ -12,76 +12,86 @@ Vagrant.configure("2") do |config|
     v.vmx["vhv.enable"] = "TRUE"
   end
 
+  # Stage 1: Basic system setup
   config.vm.provision "shell", privileged: true, inline: <<-SHELL
-    set -euo pipefail
-
-    # Base system setup
-    echo "==> Updating APT cache & installing base packages"
+    # Update and install packages
     apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
       jq make python3-pip qemu-kvm libvirt-daemon-system \
       libvirt-clients virtinst cpu-checker libguestfs-tools \
       libosinfo-bin unzip ansible git snapd
 
-    echo "==> Installing yq via snap"
+    # Install yq
     snap install yq
 
-    # SSH configuration for Packer
-    echo "==> Enabling password & root SSH login for Packer"
+    # Configure SSH for Packer
     sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
     systemctl restart sshd
 
     # Create image-builder user
-    echo "==> Creating dedicated image-builder user with sudo"
-    if ! id image-builder &>/dev/null; then
-      adduser --disabled-password --gecos "" image-builder
-      echo "image-builder:StrongP@ssw0rd!" | chpasswd
-      usermod -aG sudo image-builder
-      echo "image-builder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/image-builder
-      chmod 440 /etc/sudoers.d/image-builder
-    fi
+    adduser --disabled-password --gecos "" image-builder
+    echo "image-builder:StrongP@ssw0rd!" | chpasswd
+    usermod -aG sudo image-builder
+    echo "image-builder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/image-builder
+    chmod 440 /etc/sudoers.d/image-builder
 
-    # Environment setup
-    echo "==> Setting EKSA_SKIP_VALIDATE_DEPENDENCIES for image-builder user"
+    # Prepare user environment
     echo 'export EKSA_SKIP_VALIDATE_DEPENDENCIES=true' >> /home/image-builder/.profile
     echo 'export PATH=$PATH:/snap/bin' >> /home/image-builder/.profile
     chown image-builder:image-builder /home/image-builder/.profile
 
-    # KVM setup
-    echo "==> Adding image-builder user to kvm group & fixing /dev/kvm perms"
+    # Configure KVM
     usermod -aG kvm image-builder
-    [ -c /dev/kvm ] && { chmod 666 /dev/kvm; chown root:kvm /dev/kvm; } || echo "Warning: /dev/kvm not found"
+    [ -c /dev/kvm ] && chmod 666 /dev/kvm && chown root:kvm /dev/kvm
 
-    # SSH algorithms
-    echo "==> Allowing ssh-rsa for local Ansible/Packer connections"
+    # Configure SSH algorithms
     sudo -u image-builder mkdir -p /home/image-builder/.ssh
-    echo -e "HostKeyAlgorithms +ssh-rsa\\nPubkeyAcceptedKeyTypes +ssh-rsa" | sudo -u image-builder tee /home/image-builder/.ssh/config >/dev/null
-    sudo -u image-builder chmod 600 /home/image-builder/.ssh/config
+    echo "HostKeyAlgorithms +ssh-rsa" >> /home/image-builder/.ssh/config
+    echo "PubkeyAcceptedKeyTypes +ssh-rsa" >> /home/image-builder/.ssh/config
+    chown image-builder:image-builder /home/image-builder/.ssh/config
+    chmod 600 /home/image-builder/.ssh/config
+  SHELL
 
-    # Install EKS Anywhere Image Builder CLI
-    echo "==> Installing latest eks-a image-builder CLI"
+  # Stage 2: Install image-builder CLI (simplified)
+  config.vm.provision "shell", privileged: true, inline: <<-SHELL
+    # Install image-builder CLI directly
     cd /tmp
+    curl -sLO https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml
 
-    # Get EKS-A version
-    EKSA_RELEASE_VERSION=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | yq '.spec.latestVersion')
+    # Get version using simple grep instead of yq
+    EKSA_RELEASE_VERSION=$(grep 'latestVersion' manifest.yaml | awk '{print $2}')
 
-    # Get bundle manifest URL
-    BUNDLE_MANIFEST_URL=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | \
-        yq ".spec.releases[] | select(.version==\\\"$EKSA_RELEASE_VERSION\\\").bundleManifestUrl")
+    # Get bundle URL
+    BUNDLE_MANIFEST_URL=$(grep -A1 "version: $EKSA_RELEASE_VERSION" manifest.yaml | grep bundleManifestUrl | awk '{print $2}')
 
-    # Get image builder tarball URI
-    IMAGEBUILDER_TARBALL_URI=$(curl -sL "$BUNDLE_MANIFEST_URL" | \
-        yq '.spec.versionsBundles[0].eksD.imagebuilder.uri')
+    # Download bundle manifest
+    curl -sLO $BUNDLE_MANIFEST_URL
+    BUNDLE_FILE=$(basename $BUNDLE_MANIFEST_URL)
+
+    # Get image-builder URL
+    IMAGEBUILDER_TARBALL_URI=$(grep -A5 'eksD:' $BUNDLE_FILE | grep 'imagebuilder:' -A1 | grep 'uri:' | awk '{print $2}')
 
     # Download and install
-    curl -sL "$IMAGEBUILDER_TARBALL_URI" | tar xz ./image-builder
+    curl -sL $IMAGEBUILDER_TARBALL_URI | tar xz ./image-builder
     install -m 0755 image-builder /usr/local/bin/
+  SHELL
 
-    # Validation
-    echo "==> Validating installation"
+  # Stage 3: Validation
+  config.vm.provision "shell", privileged: true, inline: <<-SHELL
+    echo "=== VALIDATION ==="
     echo -n "image-builder version: "
     sudo -u image-builder image-builder version
-    echo "==> Provisioning complete."
+
+    echo -n "KVM status: "
+    sudo -u image-builder kvm-ok || echo "KVM not available"
+
+    echo -n "Ansible version: "
+    sudo -u image-builder ansible --version | head -1
+
+    echo "SSH Config:"
+    sudo -u image-builder cat /home/image-builder/.ssh/config
+
+    echo "Provisioning complete."
   SHELL
 end
