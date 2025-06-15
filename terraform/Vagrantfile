@@ -1,0 +1,75 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+ENV['VAGRANT_DEFAULT_PROVIDER'] = 'vmware_fusion'   # hard-pin provider
+
+Vagrant.configure("2") do |config|
+  # -------- Base box -------------------------------------------------------
+  config.vm.box      = "generic/ubuntu2204"
+  config.vm.hostname = "eks-image-builder"
+
+  # -------- Networking -----------------------------------------------------
+  config.vm.network "private_network", type: "dhcp"
+
+  # -------- VMware nested virtualisation -----------------------------------
+  config.vm.provider :vmware_fusion do |v|
+    v.gui = false
+    v.vmx["vhv.enable"] = "TRUE"   # VT-x / AMD-V passthrough
+  end
+
+  # -------- Provisioning ---------------------------------------------------
+  config.vm.provision "shell", privileged: true, inline: <<-SHELL
+    set -euo pipefail
+
+    echo "==> Updating APT cache & installing base packages"
+    apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+       jq make python3-pip \
+       qemu-kvm libvirt-daemon-system libvirt-clients virtinst \
+       cpu-checker libguestfs-tools libosinfo-bin unzip ansible git snapd
+
+    echo "==> Installing yq via snap"
+    snap install yq
+
+    echo "==> Enabling password & root SSH login for Packer"
+    sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+    systemctl restart sshd
+
+    echo "==> Creating dedicated image-builder user with sudo"
+    if ! id image-builder &>/dev/null; then
+      adduser --disabled-password --gecos "" image-builder
+      echo "image-builder:StrongP@ssw0rd!" | chpasswd      # <<-- change ASAP
+      usermod -aG sudo image-builder
+    fi
+
+    echo "==> Setting EKSA_SKIP_VALIDATE_DEPENDENCIES for image-builder user"
+    su - image-builder -c "echo 'export EKSA_SKIP_VALIDATE_DEPENDENCIES=true' >> ~/.profile"
+
+    echo "==> Adding image-builder user to kvm group & fixing /dev/kvm perms"
+    usermod -aG kvm image-builder
+    chmod 666 /dev/kvm && chown root:kvm /dev/kvm
+
+    echo "==> Allowing ssh-rsa for local Ansible/Packer connections"
+    su - image-builder -c "mkdir -p ~/.ssh && printf 'HostKeyAlgorithms +ssh-rsa\\nPubkeyAcceptedKeyTypes +ssh-rsa\\n' >> ~/.ssh/config && chmod 600 ~/.ssh/config"
+
+    echo "==> Installing latest eks-a image-builder CLI"
+    su - image-builder -c <<'EOF'
+      set -e
+      export PATH=$PATH:/snap/bin           # ensure snap binaries are visible
+      cd /tmp
+
+      EKSA_RELEASE_VERSION=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | yq '.spec.latestVersion')
+
+      BUNDLE_MANIFEST_URL=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | \
+        yq ".spec.releases[] | select(.version==\"${EKSA_RELEASE_VERSION}\").bundleManifestUrl")
+
+      IMAGEBUILDER_TARBALL_URI=$(curl -sL "${BUNDLE_MANIFEST_URL}" | \
+        yq '.spec.versionsBundles[0].eksD.imagebuilder.uri')
+
+      curl -sL "${IMAGEBUILDER_TARBALL_URI}" | tar xz ./image-builder
+      sudo install -m 0755 image-builder /usr/local/bin/image-builder
+    EOF
+
+    echo "==> Provisioning complete."
+  SHELL
+end
