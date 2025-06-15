@@ -36,10 +36,12 @@ Vagrant.configure("2") do |config|
       echo "image-builder:StrongP@ssw0rd!" | chpasswd
       usermod -aG sudo image-builder
       echo "image-builder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/image-builder
+      chmod 440 /etc/sudoers.d/image-builder
     fi
 
     echo "==> Setting EKSA_SKIP_VALIDATE_DEPENDENCIES for image-builder user"
     echo 'export EKSA_SKIP_VALIDATE_DEPENDENCIES=true' >> /home/image-builder/.profile
+    chown image-builder:image-builder /home/image-builder/.profile
 
     echo "==> Adding image-builder user to kvm group & fixing /dev/kvm perms"
     usermod -aG kvm image-builder
@@ -51,28 +53,26 @@ Vagrant.configure("2") do |config|
     sudo -u image-builder chmod 600 /home/image-builder/.ssh/config
 
     echo "==> Installing latest eks-a image-builder CLI"
-    INSTALL_SCRIPT="/tmp/install-image-builder.sh"
-    cat > "$INSTALL_SCRIPT" <<'EOS'
-#!/bin/bash
-set -e
-export PATH="$PATH:/snap/bin"
-cd /tmp
+    # Install as root since it's a system-wide binary
+    cd /tmp
 
-EKSA_RELEASE_VERSION=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | yq '.spec.latestVersion')
+    # Get the latest EKS-A version
+    EKSA_RELEASE_VERSION=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | /snap/bin/yq '.spec.latestVersion')
 
-BUNDLE_MANIFEST_URL=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | \
-  yq ".spec.releases[] | select(.version==\"$EKSA_RELEASE_VERSION\").bundleManifestUrl")
+    # Get bundle manifest URL
+    BUNDLE_MANIFEST_URL=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | \
+        /snap/bin/yq ".spec.releases[] | select(.version==\"$EKSA_RELEASE_VERSION\").bundleManifestUrl")
 
-IMAGEBUILDER_TARBALL_URI=$(curl -sL "$BUNDLE_MANIFEST_URL" | \
-  yq '.spec.versionsBundles[0].eksD.imagebuilder.uri')
+    # Get image builder tarball URI
+    IMAGEBUILDER_TARBALL_URI=$(curl -sL "$BUNDLE_MANIFEST_URL" | \
+        /snap/bin/yq '.spec.versionsBundles[0].eksD.imagebuilder.uri')
 
-curl -sL "$IMAGEBUILDER_TARBALL_URI" | tar xz ./image-builder
-sudo install -m 0755 image-builder /usr/local/bin/image-builder
-EOS
+    # Download and install
+    curl -sL "$IMAGEBUILDER_TARBALL_URI" | tar xz ./image-builder
+    install -m 0755 image-builder /usr/local/bin/image-builder
 
-    chmod +x "$INSTALL_SCRIPT"
-    sudo -u image-builder bash "$INSTALL_SCRIPT"
-    rm -f "$INSTALL_SCRIPT"
+    echo "==> Setting PATH for image-builder user"
+    echo 'export PATH=$PATH:/snap/bin' >> /home/image-builder/.profile
 
     echo "==> Validating installation"
     sudo -u image-builder image-builder version
