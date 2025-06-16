@@ -1,0 +1,232 @@
+#!/bin/bash
+#
+# =================================================================================
+# EKS Anywhere Image Builder - Ubuntu 24.04 Setup Script
+#
+# Description: This script prepares an Ubuntu 24.04 system to be used as a
+#              template for building EKS Anywhere images with Packer.
+#
+# Idempotent: Yes - can be run multiple times without unintended side effects.
+# =================================================================================
+
+# --- Script Configuration ---
+set -euo pipefail
+
+# --- Globals ---
+readonly BUILDER_USERNAME="image-builder"
+
+# --- Logging Functions ---
+log() {
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - INFO - $1"
+}
+
+error_exit() {
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - ERROR - $1" >&2
+    exit 1
+}
+
+# =================================================================================
+# STEP 1: CONFIGURE SYSTEM-WIDE SSH SETTINGS
+# =================================================================================
+configure_ssh() {
+    log "[Step 1] Configuring system-wide SSH for Packer compatibility..."
+    # ... (This function is unchanged) ...
+    local ssh_config_file="/etc/ssh/sshd_config"
+    local needs_restart=false
+    if grep -qE '^PasswordAuthentication\s+yes$' "$ssh_config_file" && grep -qE '^PermitRootLogin\s+yes$' "$ssh_config_file"; then
+        log "[Step 1] SSH is already configured correctly. Skipping."
+        return
+    fi
+    log "[Step 1] Updating SSH configuration..."
+    sudo sed -i.bak -E 's/^(#\s*)?PasswordAuthentication\s+.*/PasswordAuthentication yes/' "$ssh_config_file"
+    sudo sed -i -E 's/^(#\s*)?PermitRootLogin\s+.*/PermitRootLogin yes/' "$ssh_config_file"
+    needs_restart=true
+    log "[Step 1] Validating SSH configuration..."
+    if ! sudo grep -qE '^PasswordAuthentication\s+yes$' "$ssh_config_file" || ! sudo grep -qE '^PermitRootLogin\s+yes$' "$ssh_config_file"; then
+        error_exit "[Step 1] Validation failed. SSH configuration is incorrect."
+    fi
+    log "[Step 1] Validation successful."
+    if [[ "$needs_restart" == true ]]; then
+        log "[Step 1] Restarting sshd service to apply changes..."
+        sudo systemctl restart sshd || error_exit "[Step 1] Failed to restart sshd service."
+        log "[Step 1] sshd service restarted successfully."
+    fi
+}
+
+# =================================================================================
+# STEP 2: CREATE THE DEDICATED BUILDER ACCOUNT
+# =================================================================================
+create_builder_user() {
+    log "[Step 2] Creating dedicated builder account '$BUILDER_USERNAME'..."
+    # ... (This function is unchanged) ...
+    if id "$BUILDER_USERNAME" &>/dev/null; then
+        log "[Step 2] User '$BUILDER_USERNAME' already exists. Skipping creation."
+    else
+        log "[Step 2] User '$BUILDER_USERNAME' not found. Creating..."
+        sudo adduser --disabled-password --gecos "" "$BUILDER_USERNAME" || error_exit "[Step 2] Failed to create user '$BUILDER_USERNAME'."
+        log "[Step 2] Successfully created user '$BUILDER_USERNAME'."
+    fi
+    if groups "$BUILDER_USERNAME" | grep -q '\bsudo\b'; then
+        log "[Step 2] User '$BUILDER_USERNAME' is already in the 'sudo' group. Skipping."
+    else
+        log "[Step 2] Adding user '$BUILDER_USERNAME' to the 'sudo' group..."
+        sudo usermod -aG sudo "$BUILDER_USERNAME" || error_exit "[Step 2] Failed to add user to 'sudo' group."
+    fi
+    log "[Step 2] Configuring passwordless sudo for '$BUILDER_USERNAME'..."
+    local sudoer_file="/etc/sudoers.d/99-${BUILDER_USERNAME}-nopasswd"
+    local sudoer_config="${BUILDER_USERNAME} ALL=(ALL) NOPASSWD: ALL"
+    if [ -f "$sudoer_file" ] && grep -qF "$sudoer_config" "$sudoer_file"; then
+        log "[Step 2] Passwordless sudo is already configured. Skipping."
+    else
+        log "[Step 2] Creating sudoers file at $sudoer_file"
+        echo "$sudoer_config" | sudo tee "$sudoer_file" > /dev/null
+        sudo chmod 0440 "$sudoer_file"
+        sudo visudo -c -f "$sudoer_file" || error_exit "[Step 2] Failed to validate new sudoers file. Please check syntax."
+        log "[Step 2] Successfully configured passwordless sudo."
+    fi
+    local ssh_dir="/home/$BUILDER_USERNAME/.ssh"
+    log "[Step 2] Ensuring SSH directory exists and has correct permissions..."
+    sudo mkdir -p "$ssh_dir"
+    sudo touch "$ssh_dir/authorized_keys"
+    sudo chown -R "${BUILDER_USERNAME}:${BUILDER_USERNAME}" "$ssh_dir"
+    sudo chmod 700 "$ssh_dir"
+    sudo chmod 600 "$ssh_dir/authorized_keys"
+}
+
+# =================================================================================
+# STEPS 3, 4, 5: RUN ALL SETUP STEPS AS THE BUILDER USER
+# =================================================================================
+run_user_scope_steps() {
+    log "Switching to '$BUILDER_USERNAME' to run user-scoped setup steps..."
+
+    # Use a heredoc to execute a block of commands as the new user.
+    # We pass the DOWNLOAD_UBUNTU_ISO variable into the user's environment.
+    sudo -E su - "$BUILDER_USERNAME" <<'EOF'
+        set -euo pipefail
+
+        log_user() {
+            echo "$(date +'%Y-%m-%d %H:%M:%S') - INFO (as image-builder) - $1"
+        }
+
+        # --- Definition for Step 3 ---
+        run_step_3() {
+            log_user "--- Starting Step 3: Prepare Builder Environment ---"
+            # ... (This function is unchanged) ...
+            log_user "[3.1] Configuring EKSA_SKIP_VALIDATE_DEPENDENCIES..."
+            if ! grep -q "EKSA_SKIP_VALIDATE_DEPENDENCIES" ~/.profile; then echo 'export EKSA_SKIP_VALIDATE_DEPENDENCIES=true' >> ~/.profile; fi
+            source ~/.profile
+            log_user "[3.2] Installing required packages..."
+            sudo apt-get update -y && sudo apt-get install -y jq make python3-pip qemu-kvm libvirt-daemon-system libvirt-clients virtinst cpu-checker libguestfs-tools libosinfo-bin unzip ansible git
+            sudo snap install yq
+            log_user "[3.3] Configuring KVM access and SSH..."
+            if ! groups | grep -q '\bkvm\b'; then sudo usermod -aG kvm "$(whoami)"; fi
+            sudo chmod 666 /dev/kvm && sudo chown root:kvm /dev/kvm
+            mkdir -p ~/.ssh
+            if ! grep -q "HostKeyAlgorithms" ~/.ssh/config &>/dev/null; then printf 'HostKeyAlgorithms +ssh-rsa\nPubkeyAcceptedKeyTypes +ssh-rsa\n' >> ~/.ssh/config && chmod 600 ~/.ssh/config; fi
+            log_user "Validating Step 3 setup..."
+            sudo kvm-ok
+            ansible --version | head -n 1 | grep -q '\[core 2\.' || (echo "Ansible validation failed"; exit 1)
+            yq --version | grep -q 'version v4\.' || (echo "yq validation failed"; exit 1)
+            log_user "--- Finished Step 3 ---"
+        }
+
+        # --- Definition for Step 4 ---
+        run_step_4() {
+            log_user "--- Starting Step 4: Install EKS Anywhere Image Builder CLI ---"
+            # ... (This function is unchanged) ...
+            if command -v image-builder &> /dev/null; then log_user "image-builder command already found. Skipping installation."; else cd /tmp && EKSA_RELEASE_VERSION=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | yq '.spec.latestVersion') && BUNDLE_MANIFEST_URL=$(curl -sL https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml | yq ".spec.releases[] | select(.version==\"$EKSA_RELEASE_VERSION\").bundleManifestUrl") && IMAGEBUILDER_TARBALL_URI=$(curl -sL "$BUNDLE_MANIFEST_URL" | yq '.spec.versionsBundles[0].eksD.imagebuilder.uri') && curl -sL "$IMAGEBUILDER_TARBALL_URI" | tar xz ./image-builder && sudo install -m 0755 image-builder /usr/local/bin/image-builder && cd ~; fi
+            log_user "Validating Step 4 setup..."
+            image-builder version | grep -qE '^v[0-9]+\.[0-9]+' || (echo "image-builder validation failed"; exit 1)
+            log_user "--- Finished Step 4 ---"
+        }
+
+        # --- Definition for Step 5 (with pre-populated checksum) ---
+        run_step_5() {
+            log_user "--- Starting Step 5: Download Ubuntu ISO and Create Metadata ---"
+
+            local iso_filename="ubuntu-22.04.5-live-server-amd64.iso"
+            local iso_url="https://releases.ubuntu.com/22.04.5/ubuntu-22.04.5-live-server-amd64.iso"
+            local json_filename="baremetal-ubuntu.json"
+            # This is the official checksum for this specific ISO file.
+            local expected_checksum="9bc6028870aef3f74f4e16b900008179e78b130e6b0b9a140635434a46aa98b0"
+
+            cd ~ # Ensure we are in the home directory for all operations
+
+            # Check if the file exists and if its checksum is correct.
+            if [ -f "$iso_filename" ]; then
+                log_user "ISO file '$iso_filename' already exists. Validating checksum..."
+                local actual_checksum
+                actual_checksum=$(sha256sum "$iso_filename" | awk '{print $1}')
+                if [ "$actual_checksum" == "$expected_checksum" ]; then
+                    log_user "Checksum is valid. Skipping download."
+                else
+                    log_user "WARN: Checksum mismatch. Found '$actual_checksum', expected '$expected_checksum'. Deleting corrupt file." >&2
+                    rm -f "$iso_filename"
+                fi
+            fi
+
+            # If the file doesn't exist (or was deleted), download it.
+            if [ ! -f "$iso_filename" ]; then
+                log_user "Downloading Ubuntu ISO from $iso_url..."
+                wget -c -O "$iso_filename" "$iso_url"
+
+                log_user "Validating checksum of new download..."
+                local downloaded_checksum
+                downloaded_checksum=$(sha256sum "$iso_filename" | awk '{print $1}')
+                if [ "$downloaded_checksum" != "$expected_checksum" ]; then
+                    echo "ERROR: Downloaded file checksum '$downloaded_checksum' does not match expected checksum '$expected_checksum'." >&2
+                    exit 1
+                fi
+                log_user "Validation PASSED: Downloaded file checksum is correct."
+            fi
+
+            # Create the JSON file using the trusted, expected checksum.
+            log_user "Creating/updating JSON metadata file '$json_filename'..."
+            jq -n \
+              --arg url "file:///home/$USER/$iso_filename" \
+              --arg checksum "$expected_checksum" \
+              --arg type "sha256" \
+              '{iso_url: $url, iso_checksum: $checksum, iso_checksum_type: $type}' > "$json_filename"
+
+            log_user "--- Finished Step 5 ---"
+        }
+
+        # --- Main execution block for the builder user ---
+        run_step_3
+        run_step_4
+
+        # [NEW] Conditionally run Step 5 based on environment variable
+        if [ "${DOWNLOAD_UBUNTU_ISO:-false}" = "true" ]; then
+            run_step_5
+        else
+            log_user "DOWNLOAD_UBUNTU_ISO flag is not set to 'true'. Skipping Step 5 (ISO Download)."
+        fi
+EOF
+
+    if [ $? -ne 0 ]; then
+        error_exit "A command running as '$BUILDER_USERNAME' failed. Check output above."
+    fi
+    log "Finished all user-scoped setup steps successfully."
+}
+
+
+# --- Main Execution ---
+main() {
+    if [[ $EUID -ne 0 ]]; then
+      log "This script must be run as root or with sudo."
+      exit 1
+    fi
+
+    log "Starting EKS Anywhere image builder setup..."
+    configure_ssh
+    log "--------------------------------------------------"
+    create_builder_user
+    log "--------------------------------------------------"
+    run_user_scope_steps
+    log "--------------------------------------------------"
+    log "Setup script completed successfully."
+}
+
+# The -E flag for sudo is needed to preserve the DOWNLOAD_UBUNTU_ISO variable
+# when switching to the new user. We pass all arguments to main.
+main "$@"
