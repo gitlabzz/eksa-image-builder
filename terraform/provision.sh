@@ -117,11 +117,34 @@ run_user_scope_steps() {
             log_user "Installing entropy generator (haveged)..."
             sudo apt-get install -y haveged
             log_user "Installing main application packages..."
-            sudo apt-get install -y jq make python3-pip qemu-kvm libvirt-daemon-system libvirt-clients virtinst cpu-checker libguestfs-tools libosinfo-bin unzip ansible git
+            # Removed 'ansible' from this list. It will be installed via pip.
+            sudo apt-get install -y jq make python3-pip qemu-kvm libvirt-daemon-system libvirt-clients virtinst cpu-checker libguestfs-tools libosinfo-bin unzip git
             log_user "Waiting for snapd to be fully seeded..."
             sudo snap wait system seed.loaded
             log_user "Installing snap package: yq"
             sudo snap install yq
+
+            # Install the specific ansible-core version required by EKS-A
+            log_user "Ensuring correct Ansible version for EKS-A..."
+            sudo apt-get remove -y --purge ansible
+            sudo pip3 install ansible-core==2.15.13
+
+            # [NEW] Conditionally patch the EKS-A 'ensure-ansible.sh' script
+            log_user "Attempting to patch EKS-A 'ensure-ansible.sh' script..."
+            local patch_script_path="/home/$USER/eks-anywhere-build-tooling/projects/kubernetes-sigs/image-builder/image-builder/images/capi/hack/ensure-ansible.sh"
+            if [ -f "$patch_script_path" ]; then
+                # Idempotency check: if the file already contains our patch, do nothing.
+                if grep -q "raw_version=" "$patch_script_path"; then
+                    log_user "Ansible patch script already appears to be patched. Skipping."
+                else
+                    log_user "Patching '$patch_script_path' to handle modern ansible version strings..."
+                    # This long sed command replaces the old version parsing with a new, more robust one.
+                    sudo sed -i 's/ansible_version=($(ansible --version | head -1))/raw_version=$(ansible --version 2>\/dev\/null | head -1)\nif [[ "$raw_version" =~ "[" ]]; then\n  ansible_version=($(echo "$raw_version" | awk -F'"'"'[][]'"'"' '"'"'{print $2}'"'"'))\nelse\n  ansible_version=($raw_version)\nfi/' "$patch_script_path"
+                    log_user "Patch applied successfully."
+                fi
+            else
+                log_user "WARN: EKS-A ansible patch script not found at '$patch_script_path'. It will be patched if the repo is cloned and the script is re-run."
+            fi
 
             log_user "[3.3] Configuring KVM access and SSH..."
             if ! groups | grep -q '\bkvm\b'; then
@@ -139,14 +162,15 @@ run_user_scope_steps() {
             if ! sudo kvm-ok > /dev/null; then echo "Validation FAILED: KVM acceleration cannot be used." >&2; exit 1; fi
             log_user "Validation PASSED: KVM acceleration can be used."
 
-            # Relax the ansible validation to simply check if the command exists and is runnable.
-            # This is more robust against future OS package updates.
-            log_user "Validating Ansible installation..."
-            if ! ansible --version >/dev/null 2>&1; then
-                echo "Validation FAILED: The 'ansible' command is not available or failed to run." >&2
+            # Update validation to check for the EXACT required ansible-core version.
+            log_user "Validating Ansible version (expecting core 2.15.13)..."
+            local ansible_version_output
+            ansible_version_output=$(ansible --version | head -n 1)
+            if ! echo "$ansible_version_output" | grep -q '\[core 2\.15\.13\]'; then
+                echo "Validation FAILED: Ansible version is not 2.15.13. Found: $ansible_version_output" >&2
                 exit 1
             fi
-            log_user "Validation PASSED: Ansible is installed and runnable."
+            log_user "Validation PASSED: Ansible version is correct ($ansible_version_output)."
 
             log_user "Validating yq version (expecting v4.x)..."
             if ! yq --version | grep -q 'version v4\.'; then echo "Validation FAILED: yq version is not 4.x." >&2; exit 1; fi
