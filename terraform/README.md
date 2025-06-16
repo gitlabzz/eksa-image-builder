@@ -1,0 +1,1 @@
+image-builder build --os ubuntu --hypervisor baremetal --release-channel 1-31 --os-version 22.04 --baremetal-config baremetal-ubuntu.json

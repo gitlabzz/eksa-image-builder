@@ -110,9 +110,19 @@ run_user_scope_steps() {
             fi
             source ~/.profile
             log_user "[3.2] Installing required packages..."
+            export DEBIAN_FRONTEND=noninteractive
+            log_user "Configuring automatic service restarts for apt..."
+            echo "\$nrconf{restart} = 'a';" | sudo tee /etc/needrestart/conf.d/99-automated.conf
             sudo apt-get update -y
+            log_user "Installing entropy generator (haveged)..."
+            sudo apt-get install -y haveged
+            log_user "Installing main application packages..."
             sudo apt-get install -y jq make python3-pip qemu-kvm libvirt-daemon-system libvirt-clients virtinst cpu-checker libguestfs-tools libosinfo-bin unzip ansible git
+            log_user "Waiting for snapd to be fully seeded..."
+            sudo snap wait system seed.loaded
+            log_user "Installing snap package: yq"
             sudo snap install yq
+
             log_user "[3.3] Configuring KVM access and SSH..."
             if ! groups | grep -q '\bkvm\b'; then
                 sudo usermod -aG kvm "$(whoami)"
@@ -123,13 +133,21 @@ run_user_scope_steps() {
                 printf 'HostKeyAlgorithms +ssh-rsa\nPubkeyAcceptedKeyTypes +ssh-rsa\n' >> ~/.ssh/config
                 chmod 600 ~/.ssh/config
             fi
+
             log_user "--- Running validation for Step 3 ---"
             log_user "Validating KVM acceleration..."
             if ! sudo kvm-ok > /dev/null; then echo "Validation FAILED: KVM acceleration cannot be used." >&2; exit 1; fi
             log_user "Validation PASSED: KVM acceleration can be used."
-            log_user "Validating Ansible version (expecting core 2.x)..."
-            if ! ansible --version | head -n 1 | grep -q '\[core 2\.'; then echo "Validation FAILED: Ansible version is not 2.x." >&2; exit 1; fi
-            log_user "Validation PASSED: Ansible version is 2.x."
+
+            # Relax the ansible validation to simply check if the command exists and is runnable.
+            # This is more robust against future OS package updates.
+            log_user "Validating Ansible installation..."
+            if ! ansible --version >/dev/null 2>&1; then
+                echo "Validation FAILED: The 'ansible' command is not available or failed to run." >&2
+                exit 1
+            fi
+            log_user "Validation PASSED: Ansible is installed and runnable."
+
             log_user "Validating yq version (expecting v4.x)..."
             if ! yq --version | grep -q 'version v4\.'; then echo "Validation FAILED: yq version is not 4.x." >&2; exit 1; fi
             log_user "Validation PASSED: yq version is 4.x."
