@@ -2,96 +2,29 @@
 # vi: set ft=ruby :
 ENV['VAGRANT_DEFAULT_PROVIDER'] = 'vmware_fusion'
 
-Vagrant.configure("2") do |config|
-  config.vm.box      = "generic/ubuntu2204"
-  config.vm.hostname = "eks-image-builder"
-  config.vm.network "private_network", type: "dhcp"
+Vagrant.configure('2') do |config|
+  # Base box
+  config.vm.box      = 'generic/ubuntu2204'
+  config.vm.hostname = 'eks-image-builder'
 
+  # Private network (DHCP)
+  config.vm.network 'private_network', type: 'dhcp'
+
+  # VMware Fusion provider tweaks
   config.vm.provider :vmware_fusion do |v|
     v.gui = false
-    v.vmx["vhv.enable"] = "TRUE"
+    # Enable VT-x/AMD-V passthrough (nested virt)
+    v.vmx['vhv.enable'] = 'TRUE'
   end
 
-  # Stage 1: Basic system setup
-  config.vm.provision "shell", privileged: true, inline: <<-SHELL
-    # Update and install packages
-    apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      jq make python3-pip qemu-kvm libvirt-daemon-system \
-      libvirt-clients virtinst cpu-checker libguestfs-tools \
-      libosinfo-bin unzip ansible git snapd
-
-    # Install yq
-    snap install yq
-
-    # Configure SSH for Packer
-    sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-    sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-    systemctl restart sshd
-
-    # Create image-builder user
-    adduser --disabled-password --gecos "" image-builder
-    echo "image-builder:StrongP@ssw0rd!" | chpasswd
-    usermod -aG sudo image-builder
-    echo "image-builder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/image-builder
-    chmod 440 /etc/sudoers.d/image-builder
-
-    # Prepare user environment
-    echo 'export EKSA_SKIP_VALIDATE_DEPENDENCIES=true' >> /home/image-builder/.profile
-    echo 'export PATH=$PATH:/snap/bin' >> /home/image-builder/.profile
-    chown image-builder:image-builder /home/image-builder/.profile
-
-    # Configure KVM
-    usermod -aG kvm image-builder
-    [ -c /dev/kvm ] && chmod 666 /dev/kvm && chown root:kvm /dev/kvm
-
-    # Configure SSH algorithms
-    sudo -u image-builder mkdir -p /home/image-builder/.ssh
-    echo "HostKeyAlgorithms +ssh-rsa" >> /home/image-builder/.ssh/config
-    echo "PubkeyAcceptedKeyTypes +ssh-rsa" >> /home/image-builder/.ssh/config
-    chown image-builder:image-builder /home/image-builder/.ssh/config
-    chmod 600 /home/image-builder/.ssh/config
-  SHELL
-
-  # Stage 2: Install image-builder CLI (simplified)
-  config.vm.provision "shell", privileged: true, inline: <<-SHELL
-    # Install image-builder CLI directly
-    cd /tmp
-    curl -sLO https://anywhere-assets.eks.amazonaws.com/releases/eks-a/manifest.yaml
-
-    # Get version using simple grep instead of yq
-    EKSA_RELEASE_VERSION=$(grep 'latestVersion' manifest.yaml | awk '{print $2}')
-
-    # Get bundle URL
-    BUNDLE_MANIFEST_URL=$(grep -A1 "version: $EKSA_RELEASE_VERSION" manifest.yaml | grep bundleManifestUrl | awk '{print $2}')
-
-    # Download bundle manifest
-    curl -sLO $BUNDLE_MANIFEST_URL
-    BUNDLE_FILE=$(basename $BUNDLE_MANIFEST_URL)
-
-    # Get image-builder URL
-    IMAGEBUILDER_TARBALL_URI=$(grep -A5 'eksD:' $BUNDLE_FILE | grep 'imagebuilder:' -A1 | grep 'uri:' | awk '{print $2}')
-
-    # Download and install
-    curl -sL $IMAGEBUILDER_TARBALL_URI | tar xz ./image-builder
-    install -m 0755 image-builder /usr/local/bin/
-  SHELL
-
-  # Stage 3: Validation
-  config.vm.provision "shell", privileged: true, inline: <<-SHELL
-    echo "=== VALIDATION ==="
-    echo -n "image-builder version: "
-    sudo -u image-builder image-builder version
-
-    echo -n "KVM status: "
-    sudo -u image-builder kvm-ok || echo "KVM not available"
-
-    echo -n "Ansible version: "
-    sudo -u image-builder ansible --version | head -1
-
-    echo "SSH Config:"
-    sudo -u image-builder cat /home/image-builder/.ssh/config
-
-    echo "Provisioning complete."
+  # ─── Validation ────────────────────────────────────────────────────────────────
+  config.vm.provision 'shell', privileged: true, inline: <<-'SHELL'
+    echo '=== VALIDATION ==='
+    if grep -Eq '(vmx|svm)' /proc/cpuinfo; then
+      echo 'Hardware virtualization flags detected (vmx/svm) ✔'
+    else
+      echo 'WARNING: Nested virtualization NOT available.'
+    fi
+    echo 'Provisioning complete.'
   SHELL
 end
